@@ -175,3 +175,6 @@ cython_debug/
 
 # Project datasets
 dataset/tiny-imagenet-200/
+
+# Model artifacts
+models/
