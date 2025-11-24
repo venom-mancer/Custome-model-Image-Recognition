@@ -178,3 +178,6 @@ dataset/tiny-imagenet-200/
 
 # Model artifacts
 models/
+
+# wandb tracking artifacts
+wandb/
