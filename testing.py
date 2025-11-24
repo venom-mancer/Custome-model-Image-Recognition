@@ -6,6 +6,7 @@ import os
 import random
 import time
 import matplotlib.pyplot as plt
+import wandb
 
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -13,6 +14,8 @@ MODEL_PATH = './models/best_tiny_imagenet_model.pth'
 TRAIN_DIR = './dataset/tiny-imagenet-200/train'
 WORDS_FILE = './dataset/tiny-imagenet-200/words.txt'
 TEST_DIR = './dataset/tiny-imagenet-200/test/images'
+WANDB_PROJECT = os.environ.get('WANDB_EVAL_PROJECT', 'tiny-imagenet-eval')
+WANDB_RUN_NAME = os.environ.get('WANDB_EVAL_RUN_NAME')
 
 print(f"Using device: {device}")
 
@@ -51,34 +54,47 @@ def create_id_to_name_map(train_path, words_file):
 
 # Generate the map
 label_map = create_id_to_name_map(TRAIN_DIR, WORDS_FILE)
+num_classes = len(label_map) if label_map else 200
 
-class TinyImageNetNetwork(nn.Module):
-    def __init__(self, dropout_rate=0.3):
-        super(TinyImageNetNetwork, self).__init__()
-        self.flatten = nn.Flatten()
-        
-        input_features = 64 * 64 * 3  # 12,288 features
-        
-        self.linear_relu_stack = nn.Sequential(
-            nn.Linear(input_features, 1024),
-            nn.BatchNorm1d(1024),  # Normalize activations
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),  # Regularization
-            
-            nn.Linear(1024, 512),
-            nn.BatchNorm1d(512),
-            nn.ReLU(),
+class CustomCNN(nn.Module):
+    def __init__(self, num_classes=200, dropout_rate=0.3):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1),  # 64x64
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),  # 32x32
+
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),  # 16x16
+
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),  # 8x8
+
+            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d((1, 1)),  # 1x1
+        )
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
             nn.Dropout(dropout_rate),
-            
-            nn.Linear(512, 200) 
+            nn.Linear(256, 128),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout_rate),
+            nn.Linear(128, num_classes),
         )
 
     def forward(self, x):
-        x = self.flatten(x)
-        logits = self.linear_relu_stack(x)
-        return logits
+        x = self.features(x)
+        x = self.classifier(x)
+        return x
 
-model = TinyImageNetNetwork().to(device)
+model = CustomCNN(num_classes=num_classes).to(device)
 
 if os.path.exists(MODEL_PATH):
     model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
@@ -91,7 +107,9 @@ model.eval()
 
 transform = transforms.Compose([
     transforms.Resize((64, 64)),
-    transforms.ToTensor()
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225]),
 ])
 
 def predict_and_show(folder_path, num_samples=5):
@@ -111,6 +129,16 @@ def predict_and_show(folder_path, num_samples=5):
     local_rng.shuffle(selected_files)
     print(f"Randomly selected {num_to_select} images from {len(all_files)} total images")
     print(f"Selected files: {[f[:20] + '...' if len(f) > 20 else f for f in selected_files]}")
+
+    wandb_run = wandb.init(
+        project=WANDB_PROJECT,
+        name=WANDB_RUN_NAME,
+        config={
+            "num_samples": num_samples,
+            "device": device,
+            "model_path": MODEL_PATH,
+        },
+    )
 
     # Setup Plot
     plt.figure(figsize=(15, 6))
@@ -136,6 +164,14 @@ def predict_and_show(folder_path, num_samples=5):
         else:
             class_name = f"Class {idx}"
 
+        wandb.log({
+            "sample_image": wandb.Image(image, caption=f"{class_name} ({conf*100:.1f}%)"),
+            "predicted_class": class_name,
+            "predicted_id": idx,
+            "confidence": conf,
+            "file_name": file_name,
+        })
+
         # Visualize
         ax = plt.subplot(1, num_samples, i + 1)
         plt.imshow(image)
@@ -149,6 +185,7 @@ def predict_and_show(folder_path, num_samples=5):
 
     plt.tight_layout()
     plt.show()
+    wandb.finish()
 
 # Run it
 predict_and_show(TEST_DIR, num_samples=5)
